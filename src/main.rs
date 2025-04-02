@@ -1,23 +1,22 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::Result;
 use clap::Parser;
 use colored::*;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle};
+use itertools::Itertools;
 use rayon::prelude::*;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
-use std::io::{Cursor, Read};
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 use walkdir::WalkDir;
 use zip::ZipArchive;
 use lazy_static::lazy_static;
 
 mod inspect;
-use inspect::ChatMessageRole;
+use inspect::{deserialize_sample_filtered, ChatMessage, ChatMessageRole, EvalSample};
 
 lazy_static! {
     static ref SAMPLE_ID_EPOCH_RE: Regex =
@@ -32,8 +31,8 @@ struct Args {
     path: PathBuf,
 
     /// Search pattern (regex)
-    #[arg(short, long, required = true)]
-    pattern: String,
+    #[arg(short, long)]
+    message_regex: Option<String>,
 
     /// Filter by sample ID
     #[arg(short, long)]
@@ -43,9 +42,9 @@ struct Args {
     #[arg(short, long, default_value = "all")]
     epochs: IntFilter,
 
-    /// Filter by message role (comma-separated list: user,assistant,system)
-    #[arg(short, long)]
-    roles: Option<Vec<ChatMessageRole>>,
+    /// Filter by message role
+    #[arg(short, long, value_delimiter = ',', num_args = 0..)]
+    roles: Vec<ChatMessageRole>,
 
     /// Number of threads to use (default: number of CPU cores)
     #[arg(short, long)]
@@ -93,13 +92,6 @@ impl Filter<u32> for IntFilter {
     }
 }
 
-fn read_zip_file(path: &Path) -> Result<Vec<u8>> {
-    let mut file = std::fs::File::open(path)?;
-    let mut buffer = Vec::new();
-    file.read_to_end(&mut buffer)?;
-    Ok(buffer)
-}
-
 fn sample_id_and_epoch_from_filename(filename: String) -> Option<(String, u32)> {
     let caps = SAMPLE_ID_EPOCH_RE.captures(&filename);
     if let Some(caps) = caps {
@@ -115,15 +107,13 @@ fn matching_samples_in_log<'a>(
     log_path: &Path,
     sample_regex: &'a Option<Regex>,
     epoch_filter: &'a IntFilter,
-) -> Result<Box<dyn Iterator<Item = String> + 'a>> {
-    let buffer = read_zip_file(log_path)?;
-    let reader = Cursor::new(buffer);
-    let archive: ZipArchive<Cursor<Vec<u8>>> = ZipArchive::new(reader)?;
+) -> Result<Vec<String>> {
+    let reader = std::fs::File::open(log_path)?;
+    let archive: ZipArchive<std::fs::File> = ZipArchive::new(reader)?;
 
     // Collect file names into owned String values
 
     let file_names: Vec<String> = archive.file_names().map(|s| s.to_string()).collect();
-    println!("file_names: {:?}", file_names);
     let file_name_matches = move |name: &String| {
         sample_id_and_epoch_from_filename(name.clone()).map_or(false, |(sample_id, epoch)| {
             (sample_regex.as_ref().map_or(true, |re| re.is_match(&sample_id))) && epoch_filter.filter(&epoch)
@@ -131,18 +121,84 @@ fn matching_samples_in_log<'a>(
     };
 
     // Create an iterator of owned Strings
-    Ok(Box::new(
-        file_names
-            .into_iter()
-            .filter(move |name| file_name_matches(name)),
-    ))
+    Ok(file_names
+        .into_iter()
+        .filter(move |name| file_name_matches(name))
+        .collect())
 }
 
-fn process_eval_file(path: &Path, pattern: &Regex, sample_ids: &Option<Regex>, epochs: &IntFilter, roles: &Option<Vec<ChatMessageRole>>) -> Result<Vec<String>> {
-    for file in matching_samples_in_log(path, &sample_ids, &epochs)? {
-        println!("file: {}", file);
+fn read_sample_filtered<F>(log_path: &Path, sample_filename: &str, message_filter: F) -> Result<EvalSample>
+where
+    F: Fn(&ChatMessage) -> bool,
+{
+    let reader = std::fs::File::open(log_path)?;
+    let mut archive: ZipArchive<std::fs::File> = ZipArchive::new(reader)?;
+
+    let file = archive.by_name(sample_filename)?;
+    let sample = deserialize_sample_filtered(file, message_filter)?;
+    Ok(sample)
+}
+
+fn process_eval_file(log_path: &Path, sample_paths: &Vec<String>, roles: &Option<Vec<ChatMessageRole>>, pattern: Option<&Regex>) -> Vec<EvalSample> {
+    let message_filter = move |message: &ChatMessage| {
+        if let Some(roles) = roles {
+            if !roles.contains(&message.role){ return false }
+        }
+        if let Some(pattern) = pattern {
+            if !pattern.is_match(&message.content) { return false }
+        }
+        true
+    };
+
+    return sample_paths.par_iter()
+        .map(|file| {
+            read_sample_filtered(&log_path, file, &message_filter).expect(&format!("Failed to read sample {}", file))
+        })
+        .collect::<Vec<EvalSample>>();
+        // .collect::<HashMap<String, Vec<Option<ChatMessage>>>>();
+
+    // sample_messages
+}
+
+fn display_message(source: (&Path, &str, i64), message: &ChatMessage, highlight_regex: Option<&Regex>) {
+    let (log_file, sample_id, epoch) = source;
+    // let terminal_width = term_size::dimensions().map(|(w, _)| w).unwrap_or(80);
+    
+    // Determine role-based color
+    let role_color = match message.role {
+        ChatMessageRole::System => Color::Magenta,
+        ChatMessageRole::User => Color::Blue,
+        ChatMessageRole::Assistant => Color::Green,
+        ChatMessageRole::Tool => Color::Yellow,
+    };
+
+    // Format role
+    let role = format!("[{}]", message.role.to_string().to_lowercase())
+        .color(role_color)
+        .bold();
+    
+    // Create header with source info and role
+    let header = format!("{} sample {} epoch {} | {}", 
+        log_file.file_name().unwrap().to_string_lossy().cyan(),
+        sample_id.yellow(),
+        epoch.to_string().green(),
+        role
+    );
+    
+    // Process content with highlighting
+    let mut content = message.content.clone();
+    if let Some(regex) = highlight_regex {
+        content = regex.replace_all(&content, |caps: &regex::Captures| {
+            format!("{}", caps[0].red().bold())
+        }).to_string();
     }
-    Ok(vec![])
+
+    // Print header
+    println!("\n{}", header);
+    
+    println!("{}", content);
+
+    println!(); // Add spacing between messages
 }
 
 fn main() -> Result<()> {
@@ -151,10 +207,10 @@ fn main() -> Result<()> {
     // Parse filters
     let sample_ids = args.samples.map(|s| Regex::new(&s).ok()).flatten();
     let epochs = args.epochs;
-    let roles = args.roles;
+    let roles = (!args.roles.is_empty()).then_some(args.roles);
 
     // Compile regex pattern
-    let pattern = Regex::new(&args.pattern)?;
+    let message_regex = args.message_regex.map(|s| Regex::new(&s).expect("Failed to compile message regex"));
 
     // Collect all .eval files
     let paths: Vec<PathBuf> = if args.path.is_file() {
@@ -181,19 +237,21 @@ fn main() -> Result<()> {
 
     // Process files in parallel
     // let m = MultiProgress::new();
-    let results: Vec<_> = paths
+    paths
         .par_iter()
         .map(|path| {
-            println!("path: {}", path.display());
-            let result = process_eval_file(path, &pattern, &sample_ids, &epochs, &roles);
-            return false;
-            // process_eval_file(path, &pattern, &sample_ids, &epochs, &roles)
+            let sample_paths = matching_samples_in_log(&path, &sample_ids, &epochs).unwrap();
+            (path, process_eval_file(path, &sample_paths, &roles, message_regex.as_ref()))
         })
-        .collect();
-        // .collect::<Result<Vec<_>>>()?
-        // .into_iter()
-        // .flatten()
-        // .collect();
+        .for_each(|(path, samples)| {
+            for sample in samples {
+                for message in sample.messages.iter().dedup_by(|a, b| a.is_none() && b.is_none()) {
+                    if let Some(message) = message {
+                        display_message((path, &sample.id, sample.epoch), message, message_regex.as_ref());
+                    }
+                }
+            }
+        });
 
     pb.finish_with_message("Search complete");
 
