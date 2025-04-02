@@ -1,6 +1,7 @@
-# Fast Eval Read
+# inspect-grep
 
-A fast and efficient command-line tool for searching and filtering evaluation logs stored in .eval files. Built with Rust for high performance.
+Fast command-line tool for messages in collections of Inspect .eval logs.
+Uses concurrent direct zip reading to process only the files that match the search criteria, in parallel.
 
 ## Features
 
@@ -12,7 +13,6 @@ A fast and efficient command-line tool for searching and filtering evaluation lo
   - Message content (using regex patterns)
 - Parallel processing for improved performance
 - Colored output with syntax highlighting
-- Progress bar for long-running searches
 - Support for both single files and directories
 
 ## Installation
@@ -40,7 +40,6 @@ inspect-grep <path> [options]
   - Format: "all", "1,2,3", or "1-5"
 - `-r, --roles <roles>`: Filter by message roles (comma-separated)
   - Available roles: system, user, assistant, tool
-- `-t, --threads <number>`: Number of threads to use (default: number of CPU cores)
 
 ### Examples
 
