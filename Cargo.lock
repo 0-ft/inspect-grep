@@ -319,25 +319,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 
 [[package]]
-name = "fast-eval-read"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "colored",
- "indicatif",
- "itertools",
- "lazy_static",
- "rayon",
- "regex",
- "serde",
- "serde_json",
- "term_size",
- "walkdir",
- "zip",
-]
-
-[[package]]
 name = "flate2"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -392,6 +373,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "inspect-grep"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "colored",
+ "indicatif",
+ "itertools",
+ "lazy_static",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_json",
+ "term_size",
+ "walkdir",
+ "zip",
 ]
 
 [[package]]
